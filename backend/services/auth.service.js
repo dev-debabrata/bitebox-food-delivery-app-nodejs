@@ -12,7 +12,7 @@ import {
 } from "../models/user.model.js";
 import { ApiError } from "../utils/api-error.js";
 import { hashToken, randomToken, signAccessToken } from "../utils/tokens.js";
-import { sendMail } from "./mail.service.js";
+import { sendEmail } from "./email-template.js";
 import { notify, notifyAdmins } from "./notification.service.js";
 import { CHANNELS } from "../models/notification-delivery.model.js";
 import { OTP_PURPOSES } from "../models/otp-challenge.model.js";
@@ -97,13 +97,12 @@ export async function register(
       : null;
 
   await checkNewAccount(email, phone);
-  let phoneVerifiedAt;
+  let emailVerifiedAt;
   if (signupNeedsCode()) {
-    // Step 2: the account is created only with the code texted to its number.
-    if (!phone) throw ApiError.badRequest("Enter your mobile number", [{ field: "phone", message: "Enter your mobile number" }]);
-    if (!code) throw ApiError.badRequest("Enter the code we sent to your phone", [{ field: "code", message: "Enter the 6-digit code" }]);
-    await otp.checkCode(phone, OTP_PURPOSES.REGISTER, code);
-    phoneVerifiedAt = new Date();
+    // Step 2: the account is created only with the code emailed to its address.
+    if (!code) throw ApiError.badRequest("Enter the code we sent to your email", [{ field: "code", message: "Enter the 6-digit code" }]);
+    await otp.checkEmailCode(email, OTP_PURPOSES.REGISTER_EMAIL, code);
+    emailVerifiedAt = new Date();
   }
 
   const user = await User.create({
@@ -111,10 +110,11 @@ export async function register(
     email,
     phone,
     role,
-    phoneVerifiedAt,
+    emailVerifiedAt,
     passwordHash: await hashPassword(password),
   });
   logger.info({ userId: user.id, role }, "User registered");
+  // Already verified with the code, so sendEmailVerification sends no link.
   await sendEmailVerification(user).catch((err) =>
     logger.error({ err, userId: user.id }, "Could not send the verification email"),
   );
@@ -139,18 +139,22 @@ async function checkNewAccount(email, phone) {
     throw ApiError.conflict("An account with this phone number already exists");
 }
 
-/** New accounts confirm their number by SMS first (env.signupOtpRequired, while SMS is on). */
 /** What the sign-in and profile pages may offer: SMS codes only when an SMS provider is set up. */
 export const authMethods = () => ({ phone: channelEnabled(CHANNELS.SMS) });
-export const signupNeedsCode = () => (signupOverride ?? env.signupOtpRequired) && channelEnabled(CHANNELS.SMS);
+/** New accounts confirm their email with an emailed code first (SIGNUP_OTP_REQUIRED). */
+export const signupNeedsCode = () => signupOverride ?? env.signupOtpRequired;
 let signupOverride = null;
 /** Tests: require the sign-up code (true/false), or null for the configured behaviour. */
 export const useSignupCode = (value) => (signupOverride = value);
 
-/** Step 1 of sign-up: the email and number are free, so text a code to the number. */
+/**
+ * Step 1 of sign-up: the email and number are free, so email a code to the address. While codes
+ * are off, says so and the client creates the account at once.
+ */
 export async function requestSignupCode({ email, phone }, ip) {
   await checkNewAccount(email, phone);
-  return otp.sendCode(phone, OTP_PURPOSES.REGISTER, ip, true);
+  if (!signupNeedsCode()) return { codeRequired: false };
+  return { ...(await otp.sendEmailCode(email, OTP_PURPOSES.REGISTER_EMAIL, ip)), codeRequired: true };
 }
 
 /** The welcome notification (in-app, and email when allowed) per role. */
@@ -222,13 +226,33 @@ export async function sendEmailVerification(user) {
     { _id: user._id },
     { emailVerificationTokenHash: hashToken(token), emailVerificationExpiresAt: new Date(Date.now() + hours * 3_600_000) },
   );
-  const link = `${env.clientUrls[0]}/verify-email?token=${encodeURIComponent(token)}`;
-  await sendMail({
-    to: user.email,
+  await sendEmail(user.email, {
     subject: "Confirm your BiteBox email",
-    text: `Hi ${user.name},\n\nConfirm this is your email address for BiteBox:\n\n${link}\n\nThe link works for ${hours} hours. If you did not create an account, ignore this email.`,
-    html: `<p>Hi ${escapeHtml(user.name)},</p><p>Confirm this is your email address for BiteBox.</p><p><a href="${link}">Confirm email</a></p><p>The link works for ${hours} hours. If you did not create an account, ignore this email.</p>`,
+    title: "Confirm your email address",
+    name: user.name,
+    lines: ["Tap the button to confirm this is your email address for BiteBox."],
+    actionLabel: "Confirm email",
+    actionUrl: `${env.clientUrls[0]}/verify-email?token=${encodeURIComponent(token)}`,
+    note: `The link works for ${hours} hours. If you did not create an account, ignore this email.`,
   });
+}
+
+/** The update that marks an email verified and drops any pending link. */
+const markEmailVerified = () => ({
+  $set: { emailVerifiedAt: new Date() },
+  $unset: { emailVerificationTokenHash: 1, emailVerificationExpiresAt: 1 },
+});
+
+/** Emails a signed-in person a code that confirms their address (the account page). */
+export async function requestEmailCode(user, ip) {
+  if (user.emailVerifiedAt) throw ApiError.conflict("Your email is already verified");
+  return otp.sendEmailCode(user.email, OTP_PURPOSES.VERIFY_EMAIL, ip, user.name);
+}
+
+export async function verifyEmailCode(user, code) {
+  if (user.emailVerifiedAt) throw ApiError.conflict("Your email is already verified");
+  await otp.checkEmailCode(user.email, OTP_PURPOSES.VERIFY_EMAIL, code);
+  return User.findByIdAndUpdate(user._id, markEmailVerified(), { returnDocument: "after" });
 }
 
 export async function resendEmailVerification(user) {
@@ -240,7 +264,7 @@ export async function verifyEmail(token) {
   // Consume the token atomically so it works once.
   const user = await User.findOneAndUpdate(
     { emailVerificationTokenHash: hashToken(token), emailVerificationExpiresAt: { $gt: new Date() } },
-    { $set: { emailVerifiedAt: new Date() }, $unset: { emailVerificationTokenHash: 1, emailVerificationExpiresAt: 1 } },
+    markEmailVerified(),
   );
   if (!user) throw ApiError.badRequest("This link is invalid or has expired. Ask for a new one");
 }
@@ -303,23 +327,35 @@ export async function forgotPassword(email) {
   );
   await user.save();
 
-  const link = `${env.clientUrls[0]}/reset-password?token=${encodeURIComponent(token)}`;
-  await sendMail({
-    to: user.email,
+  await sendEmail(user.email, {
     subject: "Reset your BiteBox password",
-    text: `Hi ${user.name},\n\nUse this link to reset your BiteBox password. It expires in ${env.passwordReset.ttlMinutes} minutes and can only be used once:\n\n${link}\n\nIf you did not request this, you can ignore this email.`,
-    html: `<p>Hi ${escapeHtml(user.name)},</p><p>Use the link below to reset your BiteBox password. It expires in ${env.passwordReset.ttlMinutes} minutes and can only be used once.</p><p><a href="${link}">Reset password</a></p><p>If you did not request this, you can ignore this email.</p>`,
+    title: "Reset your password",
+    name: user.name,
+    lines: ["We got a request to reset your BiteBox password. Tap the button to choose a new one."],
+    actionLabel: "Reset password",
+    actionUrl: `${env.clientUrls[0]}/reset-password?token=${encodeURIComponent(token)}`,
+    note: `The link expires in ${env.passwordReset.ttlMinutes} minutes and works once. If you did not ask for this, you can ignore this email; your password stays the same.`,
   });
 }
 
+/** A new password must differ from the one it replaces (reset and change). */
+async function refuseCurrentPassword(passwordHash, newPassword, field) {
+  if (passwordHash && (await bcrypt.compare(newPassword, passwordHash))) {
+    const message = "Your new password must be different from your current password";
+    throw ApiError.badRequest(message, [{ field, message }]);
+  }
+}
+
 export async function resetPassword(token, newPassword) {
+  const match = { passwordResetTokenHash: hashToken(token), passwordResetExpiresAt: { $gt: new Date() } };
+  const current = await User.findOne(match).select("+passwordHash");
+  if (!current) throw ApiError.badRequest("This reset link is invalid or has expired");
+  // Refused before the link is used, so it still works with a different password.
+  await refuseCurrentPassword(current.passwordHash, newPassword, "password");
   const passwordHash = await hashPassword(newPassword);
   // Atomically consume the token so it can only be used once.
   const user = await User.findOneAndUpdate(
-    {
-      passwordResetTokenHash: hashToken(token),
-      passwordResetExpiresAt: { $gt: new Date() },
-    },
+    match,
     {
       $set: { passwordHash },
       $unset: { passwordResetTokenHash: 1, passwordResetExpiresAt: 1 },
@@ -339,6 +375,7 @@ export async function changePassword(userId, currentPassword, newPassword) {
   if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
     throw ApiError.badRequest("Current password is incorrect");
   }
+  await refuseCurrentPassword(user.passwordHash, newPassword, "newPassword");
   user.passwordHash = await hashPassword(newPassword);
   await endSessions(user, "password-change");
 }
@@ -373,12 +410,3 @@ export async function updateProfile(userId, { name, phone, avatarUrl }) {
 
 export { revokeAllSessions };
 
-function escapeHtml(value) {
-  return value.replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        c
-      ],
-  );
-}
