@@ -56,8 +56,10 @@
               ]
             },
             "allowedCommonJsDependencies": [
+              "dijkstrajs",
               "leaflet",
               "lottie-web",
+              "qrcode",
               "quill-delta"
             ]
           },
