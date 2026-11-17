@@ -41,6 +41,35 @@ const addressQuery = {
   schema: { type: "string" },
   description: "Quote delivery to this address (default address if omitted)",
 };
+const CHANNELS = ["upi", "card", "netbanking", "wallet"];
+const KINDS = ["coupon", "restaurant_offer", "platform_offer", "payment_offer"];
+const paymentQuery = {
+  in: "query",
+  name: "payment",
+  schema: { type: "string", enum: CHANNELS },
+  description: "The online payment channel; prices that channel's payment offer (omit for cash)",
+};
+const discountSummary = {
+  kind: { type: "string", enum: KINDS },
+  code: { type: "string" },
+  name: { type: ["string", "null"] },
+  description: { type: ["string", "null"] },
+  discountType: { enum: ["percent", "flat", "free_delivery"] },
+  discountValue: { type: "integer", description: "Percent (1-100), paise for flat, 0 for free delivery" },
+  maxDiscountPaise: { type: ["integer", "null"], description: "Cap on a percent discount" },
+  minOrderPaise: { type: "integer" },
+};
+const discountLine = {
+  type: "object",
+  description: "One discount, in the order it applied, with what it saved and who funds it",
+  properties: {
+    ...discountSummary,
+    foodPaise: { type: "integer" },
+    deliveryPaise: { type: "integer", description: "The delivery fee it waived" },
+    savingPaise: { type: "integer" },
+    fundedBy: { type: "string", enum: ["restaurant", "platform"] },
+  },
+};
 const paging = [
   { in: "query", name: "page", schema: { type: "integer", minimum: 1 } },
   {
@@ -121,6 +150,17 @@ const couponInput = {
       type: ["string", "null"],
       description: "Restrict to one restaurant",
     },
+    kind: {
+      type: "string",
+      enum: ["coupon", "platform_offer", "payment_offer"],
+      description: "A coupon needs its code; offers apply automatically (restaurant offers are made by restaurants)",
+    },
+    paymentChannels: {
+      type: "array",
+      maxItems: 4,
+      items: { type: "string", enum: CHANNELS },
+      description: "Payment offers only: the online channels it is for (empty: any online payment)",
+    },
   },
 };
 
@@ -172,14 +212,49 @@ export const checkoutSchemas = {
         type: ["object", "null"],
         properties: {
           code: { type: "string" },
-          description: { type: "string" },
-          discountPaise: { type: "integer" },
+          description: { type: ["string", "null"] },
+          discountType: { enum: ["percent", "flat", "free_delivery"] },
+          discountPaise: { type: "integer", description: "The coupon's own saving within the stack" },
         },
       },
       couponError: {
         type: ["object", "null"],
         properties: { code: { type: "string" }, message: { type: "string" } },
       },
+      bestCoupon: {
+        type: ["object", "null"],
+        description:
+          "The coupon code that saves most next to the automatic offers, priced by the server (null when none saves).",
+        properties: { ...discountSummary, savingPaise: { type: "integer" } },
+      },
+      discounts: {
+        type: "array",
+        description:
+          "Every discount on the bill in stack order: restaurant offer, platform offer, coupon, payment offer",
+        items: discountLine,
+      },
+      restaurantOffers: {
+        type: "array",
+        description:
+          "Every restaurant offer this cart can use, best first. Only one applies: the best, or the one the customer picked by applying its code with POST /cart/coupon",
+        items: {
+          type: "object",
+          properties: { ...discountSummary, savingPaise: { type: "integer" }, applied: { type: "boolean" } },
+        },
+      },
+      paymentOffers: {
+        type: "array",
+        description: "The best payment offer for each online channel",
+        items: {
+          type: "object",
+          properties: {
+            channel: { type: "string", enum: CHANNELS },
+            ...discountSummary,
+            savingPaise: { type: "integer" },
+          },
+        },
+      },
+      paymentChannel: { type: ["string", "null"], enum: [...CHANNELS, null] },
       address: { oneOf: [ref("DeliveryAddress"), { type: "null" }] },
       delivery: {
         type: ["object", "null"],
@@ -256,14 +331,16 @@ export const checkoutSchemas = {
         type: "object",
         properties: {
           code: { type: "string" },
-          discountPaise: { type: "integer" },
+          discountPaise: { type: "integer", description: "The coupon code's own saving" },
         },
       },
+      discounts: { type: "array", items: discountLine },
       distanceMeters: {
         type: "integer",
         description: "Straight-line distance used for the delivery fee",
       },
       paymentMethod: { type: "string", enum: ["cod", "online"] },
+      paymentChannel: { type: ["string", "null"], enum: [...CHANNELS, null] },
       paymentStatus: {
         type: "string",
         enum: ["pending", "paid", "failed", "refunded", "partially_refunded", "cancelled"],
@@ -321,14 +398,14 @@ export const checkoutPaths = {
       tags: T.cart,
       summary: "My cart, priced by the server",
       security: bearer,
-      parameters: [addressQuery],
+      parameters: [addressQuery, paymentQuery],
       responses: { 200: quote, 403: err("Customers only") },
     },
     delete: {
       tags: T.cart,
       summary: "Empty my cart",
       security: bearer,
-      parameters: [addressQuery],
+      parameters: [addressQuery, paymentQuery],
       responses: { 200: quote },
     },
   },
@@ -337,7 +414,7 @@ export const checkoutPaths = {
       tags: T.cart,
       summary: "Add a dish (quantity is added to any existing line)",
       security: bearer,
-      parameters: [addressQuery],
+      parameters: [addressQuery, paymentQuery],
       requestBody: body({
         type: "object",
         required: ["foodItemId"],
@@ -362,7 +439,7 @@ export const checkoutPaths = {
       tags: T.cart,
       summary: "Set a dish quantity (0 removes it)",
       security: bearer,
-      parameters: [foodParam, addressQuery],
+      parameters: [foodParam, addressQuery, paymentQuery],
       requestBody: body({
         type: "object",
         required: ["quantity"],
@@ -374,7 +451,7 @@ export const checkoutPaths = {
       tags: T.cart,
       summary: "Remove a dish",
       security: bearer,
-      parameters: [foodParam, addressQuery],
+      parameters: [foodParam, addressQuery, paymentQuery],
       responses: { 200: quote },
     },
   },
@@ -383,7 +460,7 @@ export const checkoutPaths = {
       tags: T.cart,
       summary: "Apply a coupon code",
       security: bearer,
-      parameters: [addressQuery],
+      parameters: [addressQuery, paymentQuery],
       requestBody: body({
         type: "object",
         required: ["code"],
@@ -401,7 +478,7 @@ export const checkoutPaths = {
       tags: T.cart,
       summary: "Remove the coupon",
       security: bearer,
-      parameters: [addressQuery],
+      parameters: [addressQuery, paymentQuery],
       responses: { 200: quote },
     },
   },
@@ -491,6 +568,11 @@ export const checkoutPaths = {
         properties: {
           addressId: { type: "string" },
           paymentMethod: { type: "string", enum: ["cod", "online"] },
+          paymentChannel: {
+            type: "string",
+            enum: CHANNELS,
+            description: "Online orders: how the customer pays (its payment offer applies). Ignored for cash.",
+          },
           note: { type: "string", maxLength: 300 },
           expectedTotalPaise: { type: "integer" },
         },
@@ -564,6 +646,12 @@ export const checkoutPaths = {
         ...paging,
         { in: "query", name: "search", schema: { type: "string" } },
         { in: "query", name: "active", schema: { type: "boolean" } },
+        {
+          in: "query",
+          name: "restaurant",
+          schema: { type: "string" },
+          description: "This restaurant's own offers and the coupons limited to it (restaurant id)",
+        },
       ],
       responses: { 200: ok({ type: "object" }), 403: err("Not an admin") },
     },

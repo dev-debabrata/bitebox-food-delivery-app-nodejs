@@ -2,12 +2,19 @@ import { body, query } from "express-validator";
 import { RESTAURANT_STATUS } from "../models/restaurant.model.js";
 import {
   booleanQuery,
+  dayRangeRules,
+  facetsQuery,
   imageUrlBody,
   mongoIdParam,
+  multiValue,
   paginationRules,
   paiseBody,
+  requiredReason,
   searchQuery,
 } from "./common.validators.js";
+import { USER_STATUS } from "../models/user.model.js";
+import { KYC_STATES } from "../services/kyc.service.js";
+import { RESTAURANT_ACCEPTING, RESTAURANT_VEG } from "../services/restaurant.service.js";
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -172,7 +179,14 @@ export const publicListRules = [
 export const adminListRules = [
   ...paginationRules,
   searchQuery(),
-  query("status").optional().isIn(Object.values(RESTAURANT_STATUS)),
+  // Every filter takes one value or several, comma-separated (OR).
+  multiValue("status", Object.values(RESTAURANT_STATUS)),
+  multiValue("city", null),
+  multiValue("cuisine", null),
+  multiValue("veg", RESTAURANT_VEG),
+  multiValue("accepting", RESTAURANT_ACCEPTING),
+  ...dayRangeRules("joinedFrom", "joinedTo"),
+  facetsQuery(),
 ];
 
 export const adminStatusRules = [
@@ -181,4 +195,49 @@ export const adminStatusRules = [
     .isIn(Object.values(RESTAURANT_STATUS))
     .withMessage("Invalid status"),
   body("reason").optional().isString().trim().isLength({ max: 500 }),
+];
+
+// Admin restaurant accounts (/admin/restaurant-accounts).
+export const RESTAURANT_ACCOUNT_SORTS = ["newest", "oldest", "name", "orders", "rating"];
+
+export const accountListRules = [
+  searchQuery(),
+  multiValue("status", Object.values(RESTAURANT_STATUS)),
+  multiValue("accountStatus", Object.values(USER_STATUS)),
+  multiValue("kyc", KYC_STATES),
+  multiValue("city", null),
+  ...dayRangeRules("joinedFrom", "joinedTo"),
+  query("sort").optional().isIn(RESTAURANT_ACCOUNT_SORTS),
+  facetsQuery(),
+  ...paginationRules,
+];
+
+/** The partner's own edit rules; anything else (status, commission, bank, owner sign-in) is dropped. */
+export const accountUpdateRules = [mongoIdParam(), ...updateRestaurantRules];
+
+const optionalReason = () =>
+  body("reason").optional({ values: "null" }).isString().trim().isLength({ max: 500 });
+
+export const ACCOUNT_STATUSES = [
+  RESTAURANT_STATUS.APPROVED,
+  RESTAURANT_STATUS.REJECTED,
+  RESTAURANT_STATUS.RESUBMISSION_REQUESTED,
+  RESTAURANT_STATUS.SUSPENDED,
+];
+
+export const accountStatusRules = [
+  mongoIdParam(),
+  body("status").isIn(ACCOUNT_STATUSES).withMessage("Invalid status"),
+  requiredReason(body("status").isIn(ACCOUNT_STATUSES.filter((s) => s !== RESTAURANT_STATUS.APPROVED))),
+  optionalReason(),
+];
+
+export const accountAcceptingRules = [
+  mongoIdParam(),
+  body("isAcceptingOrders")
+    .isBoolean({ strict: true })
+    .withMessage("isAcceptingOrders must be true or false")
+    .toBoolean(),
+  requiredReason(body("isAcceptingOrders").equals("false")),
+  optionalReason(),
 ];

@@ -1,9 +1,16 @@
 import { body, query } from "express-validator";
-import { AUDIENCES, COUPON_SOURCES, DISCOUNT_TYPES } from "../models/coupon.model.js";
+import {
+  AUDIENCES,
+  COUPON_KINDS,
+  COUPON_SOURCES,
+  DISCOUNT_TYPES,
+  PAYMENT_CHANNELS,
+} from "../models/coupon.model.js";
 import { OFFER_KINDS, SORTS, STATUS_FILTERS } from "../services/coupon.service.js";
 import { booleanQuery, mongoIdParam, paginationRules, searchQuery } from "./common.validators.js";
 
 /** Coupons and restaurant offers (Django: apps/coupons/views.py serializers). */
+const isId = (v) => /^[a-f0-9]{24}$/i.test(String(v));
 const nullableInt = (field, min) =>
   body(field)
     .optional()
@@ -16,7 +23,7 @@ const idList = (field, message) =>
     .optional()
     .isArray({ max: 200 })
     .withMessage(message)
-    .custom((list) => list.every((id) => /^[a-f0-9]{24}$/i.test(String(id))))
+    .custom((list) => list.every(isId))
     .withMessage(message);
 
 function couponRules({ partial, partner }) {
@@ -68,9 +75,21 @@ function couponRules({ partial, partner }) {
       : [
           body("restaurant")
             .optional()
-            .custom((v) => v === null || /^[a-f0-9]{24}$/i.test(String(v)))
+            .custom((v) => v === null || isId(v))
             .withMessage("Invalid restaurant"),
           idList("restaurants", "Invalid restaurant"),
+          // Admins make coupons (codes), platform offers and payment offers (both automatic).
+          body("kind")
+            .optional()
+            .isIn([COUPON_KINDS.COUPON, COUPON_KINDS.PLATFORM_OFFER, COUPON_KINDS.PAYMENT_OFFER])
+            .withMessage("Choose a coupon, platform offer or payment offer"),
+          body("paymentChannels")
+            .optional()
+            .isArray({ max: 4 })
+            .withMessage("Ensure this field has no more than 4 elements."),
+          body("paymentChannels.*")
+            .isIn(Object.values(PAYMENT_CHANNELS))
+            .withMessage("Choose UPI, card, net banking or wallet"),
         ]),
   ];
 }
@@ -86,9 +105,12 @@ export const couponListRules = [
   booleanQuery("active"),
   query("status").optional().isIn(Object.keys(STATUS_FILTERS)),
   query("owner").optional().isIn(Object.values(COUPON_SOURCES)),
+  query("kind").optional().isIn(Object.values(COUPON_KINDS)),
   query("sort").optional().isIn(Object.keys(SORTS)),
   query("from").optional().isISO8601(),
   query("to").optional().isISO8601(),
+  // One restaurant's own offers and the coupons limited to it (the admin restaurant account view).
+  query("restaurant").optional().isMongoId().withMessage("Invalid id"),
 ];
 export const activeRules = [mongoIdParam(), body("isActive").isBoolean().withMessage("isActive must be true or false").toBoolean()];
 export const reasonRules = [mongoIdParam(), body("reason").optional().isString().trim().isLength({ max: 300 })];

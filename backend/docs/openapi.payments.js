@@ -99,6 +99,10 @@ export const paymentsSchemas = {
       amountPaise: { type: "integer" },
       currency: { type: "string" },
       orderNumber: { type: "string" },
+      channel: {
+        type: ["string", "null"],
+        description: "The channel the customer chose (its payment offer is priced in); null when any will do",
+      },
     },
   },
   Notification: {
@@ -307,6 +311,12 @@ export const paymentsPaths = {
             enum: ["active", "delivered", "cancelled"],
           },
           description: "Where the order stands; cancelled includes rejected",
+        },
+        {
+          in: "query",
+          name: "customer",
+          schema: { type: "string" },
+          description: "Payments of this customer's orders (user id)",
         },
         ...paging,
       ],

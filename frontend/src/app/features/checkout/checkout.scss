@@ -233,6 +233,24 @@ h2 {
   }
 }
 
+// The server's best coupon for this cart, with a one-tap Apply (or Switch).
+.best-label {
+  margin: 0 0 var(--bb-space-1);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bb-ink-muted);
+}
+
+.best {
+  margin-bottom: var(--bb-space-2);
+}
+
+.applied.offer {
+  margin-bottom: var(--bb-space-2);
+}
+
 .applied {
   display: flex;
   align-items: center;
@@ -281,4 +299,11 @@ h2 {
   font-size: 0.8rem;
   font-weight: 400;
   color: var(--bb-ink-muted);
+}
+
+// A channel's payment offer under its name in the payment list.
+.pay-offer {
+  color: var(--bb-success);
+  font-size: 0.8rem;
+  font-weight: 600;
 }

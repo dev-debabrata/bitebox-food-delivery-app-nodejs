@@ -13,14 +13,14 @@ import { ORDER_STATUS, Order } from "../models/order.model.js";
 import { ROLES, User, USER_STATUS } from "../models/user.model.js";
 import { ApiError } from "../utils/api-error.js";
 import { toPoint } from "../utils/geo.js";
-import { escapeRegex, paginationMeta } from "../utils/pagination.js";
 import {
   declineOffer,
   dispatchSafely,
   findWaitingOrders,
 } from "./dispatch.service.js";
-import { endSessions } from "./auth.service.js";
+import { applyStatus } from "./auth.service.js";
 import { onPosition, trackedOrderId } from "./tracking.service.js";
+import { AVAILABILITY_SOURCES, setOnline } from "./rider-availability.service.js";
 import {
   pickupDistanceMeters,
   presentForRider,
@@ -48,6 +48,62 @@ export async function submittedRiderIds(userIds) {
   ]);
   const [account, details] = [withAccount, withDetails].map((list) => new Set(list.map(String)));
   return new Set(withDocuments.filter((id) => account.has(id) && details.has(id)));
+}
+
+/**
+ * submittedRiderIds as aggregation stages over riders (users, the profile joined as `rider`):
+ * adds `submitted` and `verificationState` (the verification status, with a pending rider who
+ * has not sent everything yet as NOT_SUBMITTED).
+ */
+export function submittedStages() {
+  const kinds = kyc.KINDS_FOR[ROLES.DELIVERY];
+  return [
+    {
+      $lookup: {
+        from: KycDocument.collection.name,
+        localField: "_id",
+        foreignField: "user",
+        pipeline: [
+          { $match: { kind: { $in: kinds }, status: { $ne: DOCUMENT_STATUS.REJECTED } } },
+          { $group: { _id: "$kind" } },
+        ],
+        as: "sentKinds",
+      },
+    },
+    {
+      $lookup: {
+        from: PayoutAccount.collection.name,
+        localField: "_id",
+        foreignField: "user",
+        pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }],
+        as: "sentAccount",
+      },
+    },
+    {
+      $addFields: {
+        submitted: {
+          $and: [
+            { $eq: [{ $size: "$sentKinds" }, kinds.length] },
+            { $gt: [{ $size: "$sentAccount" }, 0] },
+            { $ne: [{ $ifNull: ["$rider.vehicleType", null] }, null] },
+            { $ne: [{ $ifNull: ["$rider.address", null] }, null] },
+          ],
+        },
+      },
+    },
+    {
+      $addFields: {
+        verificationState: {
+          $cond: [
+            { $eq: ["$verificationStatus", V.PENDING] },
+            { $cond: ["$submitted", V.PENDING, NOT_SUBMITTED] },
+            "$verificationStatus",
+          ],
+        },
+      },
+    },
+    { $project: { sentKinds: 0, sentAccount: 0 } },
+  ];
 }
 
 /** A profile as JSON, with `verification.submitted`. */
@@ -120,16 +176,10 @@ export async function setAvailability(
       throw ApiError.badRequest("Add your vehicle details before going online");
     if (latitude === undefined || longitude === undefined)
       throw ApiError.badRequest("Share your location to go online");
-    await DeliveryPartner.updateOne(
-      { user: userId },
-      {
-        $set: {
-          isOnline: true,
-          location: toPoint({ latitude, longitude }),
-          locationUpdatedAt: new Date(),
-        },
-      },
-    );
+    await setOnline(userId, true, {
+      source: AVAILABILITY_SOURCES.RIDER,
+      set: { location: toPoint({ latitude, longitude }), locationUpdatedAt: new Date() },
+    });
     await offerWaitingOrders();
     return dashboard(userId);
   }
@@ -138,20 +188,21 @@ export async function setAvailability(
     userId,
     profile,
     "Finish your current delivery before going offline",
+    { source: AVAILABILITY_SOURCES.RIDER },
   );
   return dashboard(userId);
 }
 
-/** Offline rules shared by the rider and admins: never mid-delivery; a pending offer is passed on. */
-async function takeOffline(userId, profile, busyMessage) {
+/**
+ * Offline rules shared by the rider and admins: never mid-delivery; a pending offer is passed on.
+ * `log` ({ source, reason }) is what the availability history records when the rider was online.
+ */
+export async function takeOffline(userId, profile, busyMessage, log) {
   if (profile?.activeOrder)
     throw new ApiError(409, busyMessage, { code: "DELIVERY_IN_PROGRESS" });
   if (profile?.currentOffer)
     await declineOffer(userId, profile.currentOffer).catch(() => undefined);
-  await DeliveryPartner.updateOne(
-    { user: userId },
-    { $set: { isOnline: false } },
-  );
+  await setOnline(userId, false, log);
 }
 
 /** Position report from the rider's device (rate limited at the route). */
@@ -183,105 +234,43 @@ async function offerWaitingOrders() {
   }
 }
 
-// Admin
-export async function adminList({ search, online, verification }, pagination) {
-  const userFilter = { role: ROLES.DELIVERY };
-  if (search) {
-    const pattern = new RegExp(escapeRegex(search), "i");
-    userFilter.$or = [
-      { name: pattern },
-      { email: pattern },
-      { phone: pattern },
-    ];
-  }
-  if (online === true) {
-    const onlineIds = await DeliveryPartner.find({ isOnline: true }).distinct(
-      "user",
-    );
-    userFilter._id = { $in: onlineIds };
-  }
-  // Pending: sent everything and waiting for review. Not submitted: pending (or no profile yet)
-  // with something still to send. Only these filters need every rider's state.
-  let submitted = null;
-  if (verification === V.PENDING || verification === NOT_SUBMITTED) {
-    const [ids, decided] = await Promise.all([
-      submittedRiderIds(),
-      DeliveryPartner.find({ verificationStatus: { $ne: V.PENDING } }).distinct("user"),
-    ]);
-    submitted = ids;
-    // $and keeps the online filter on _id above.
-    userFilter.$and =
-      verification === V.PENDING
-        ? [{ _id: { $in: [...submitted] } }, { _id: { $nin: decided } }]
-        : [{ _id: { $nin: [...submitted, ...decided] } }];
-  } else if (verification) {
-    // No status (older profiles) counts as approved.
-    const statuses = verification === V.APPROVED ? [V.APPROVED, null] : [verification];
-    const ids = await DeliveryPartner.find({ verificationStatus: { $in: statuses } }).distinct("user");
-    userFilter.$and = [{ _id: { $in: ids } }];
-  }
-  const [users, total] = await Promise.all([
-    User.find(userFilter)
-      .sort({ createdAt: -1 })
-      .skip(pagination.skip)
-      .limit(pagination.limit),
-    User.countDocuments(userFilter),
-  ]);
-  const [profiles, submittedOnPage] = await Promise.all([
-    DeliveryPartner.find({ user: { $in: users.map((u) => u._id) } }),
-    submitted ?? submittedRiderIds(users.map((u) => u._id)),
-  ]);
-  const byUser = new Map(profiles.map((p) => [String(p.user), p]));
-  const activeOrders = await Order.find({
-    _id: { $in: profiles.map((p) => p.activeOrder).filter(Boolean) },
-  }).select("orderNumber status");
-  const orderById = new Map(activeOrders.map((o) => [String(o._id), o]));
+// What the availability history says when the system takes a rider offline.
+const ACCOUNT_OFFLINE_REASON = {
+  [USER_STATUS.INACTIVE]: "Account deactivated",
+  [USER_STATUS.SUSPENDED]: "Account suspended",
+  [USER_STATUS.BLOCKED]: "Account blocked",
+};
+const VERIFICATION_OFFLINE_REASON = {
+  [V.REJECTED]: "Verification rejected",
+  [V.RESUBMISSION_REQUESTED]: "Documents requested again",
+};
 
-  const items = users.map((u) => {
-    const p = byUser.get(String(u._id));
-    const active = p?.activeOrder ? orderById.get(String(p.activeOrder)) : null;
-    return {
-      ...u.toJSON(),
-      vehicleType: p?.vehicleType ?? null,
-      vehicleNumber: p?.vehicleNumber ?? null,
-      isOnline: p?.isOnline ?? false,
-      verificationStatus: p ? verificationOf(p) : V.PENDING,
-      submitted: submittedOnPage.has(String(u._id)),
-      locationUpdatedAt: p?.locationUpdatedAt ?? null,
-      completedDeliveries: p?.completedDeliveries ?? 0,
-      rating: p?.rating ?? null,
-      activeOrder: active
-        ? {
-            id: String(active._id),
-            orderNumber: active.orderNumber,
-            status: active.status,
-          }
-        : null,
-    };
-  });
-  return { items, pagination: paginationMeta(pagination, total) };
-}
-
-/** Suspend or reactivate a rider. Suspending takes them offline; not allowed mid-delivery. */
-async function findRider(userId) {
+export async function findRider(userId) {
   const user = await User.findOne({ _id: userId, role: ROLES.DELIVERY });
   if (!user) throw ApiError.notFound("Delivery partner not found");
   return user;
 }
 
-export async function adminSetStatus(userId, status) {
+/**
+ * Any non-active status (inactive, suspended, blocked) takes the rider offline and passes on their
+ * pending offer; not allowed mid-delivery. Asking for the current status changes nothing.
+ * Returns { user, from, changed } for the audit log.
+ */
+export async function adminSetStatus(userId, status, reason) {
   const user = await findRider(userId);
-  if (status === USER_STATUS.SUSPENDED) {
+  const from = user.status;
+  if (from === status) return { user: user.toJSON(), from, changed: false };
+  if (status !== USER_STATUS.ACTIVE) {
     const profile = await DeliveryPartner.findOne({ user: userId });
     await takeOffline(
       userId,
       profile,
       "This rider is carrying an order. Unassign or finish it first.",
+      { source: AVAILABILITY_SOURCES.SYSTEM, reason: ACCOUNT_OFFLINE_REASON[status] },
     );
   }
-  user.status = status;
-  await endSessions(user, status === USER_STATUS.SUSPENDED ? "suspended" : "logout");
-  return user.toJSON();
+  await applyStatus(user, status, reason);
+  return { user: user.toJSON(), from, changed: true };
 }
 
 // Verification
@@ -360,7 +349,12 @@ export async function adminSetVerification(userId, status, reason, adminId) {
     { returnDocument: "after" },
   );
   if (!updated) throw ApiError.conflict("This rider was updated by someone else. Refresh and try again.");
-  if (status !== V.APPROVED) await takeOffline(user._id, updated, "").catch(() => undefined); // mid-delivery: they finish it
+  // Mid-delivery: they finish it.
+  if (status !== V.APPROVED)
+    await takeOffline(user._id, updated, "", {
+      source: AVAILABILITY_SOURCES.SYSTEM,
+      reason: VERIFICATION_OFFLINE_REASON[status],
+    }).catch(() => undefined);
   const [type, title, body] = VERIFICATION_NOTICE[status];
   await notify(user._id, {
     type,

@@ -693,7 +693,16 @@ np-tabs.bb-tab-strip .tab-panel {
 
 np-tabs.bb-tab-strip {
   display: block;
+  min-width: 0;
   margin-bottom: var(--bb-space-4);
+
+  // Many tabs (account profiles): one line that scrolls sideways (bb-tab-strip adds ← →
+  // buttons), so the page never widens.
+  .tab-list {
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+  }
 }
 
 // A narrower np-menu popup for short action lists (e.g. Edit / Delete). Keep the width in sync with
@@ -1158,6 +1167,46 @@ np-time-picker .time-picker-field {
   color: var(--bb-ink-muted);
 }
 
+// A coupon ticket's APPLY / COPY / VIEW: bold text in its corner (shared/components/coupon-ticket).
+.bb-ticket-action {
+  flex-shrink: 0;
+  // Padded for the hover pill, pulled back so the text stays where it was.
+  margin: -4px -10px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+  color: var(--bb-amber-600);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  cursor: pointer;
+  &:not(:disabled):hover {
+    background: color-mix(in srgb, var(--bb-amber-600) 14%, transparent);
+  }
+  &:not(:disabled):active {
+    background: color-mix(in srgb, var(--bb-amber-600) 22%, transparent);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--bb-amber-600);
+    outline-offset: 1px;
+  }
+  &:disabled {
+    color: var(--bb-ink-muted);
+    cursor: default;
+    opacity: 0.6;
+  }
+  &.done:disabled {
+    color: var(--bb-success);
+    opacity: 1;
+  }
+}
+
 // Small links under a form step, e.g. "Resend code" and "Change details".
 .bb-form-links {
   display: flex;
@@ -1219,6 +1268,19 @@ np-time-picker .time-picker-field {
   font-weight: 600;
   cursor: pointer;
   text-decoration: underline;
+}
+
+// "← All customers": a detail page's link back to its list. On pages laid out as a grid, only the
+// text is the link.
+.bb-back-link {
+  justify-self: start;
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--bb-space-2);
+  color: inherit;
+  font-weight: 600;
+  --bb-icon-size: 18px;
 }
 
 // Role badge used in admin lists
@@ -1295,6 +1357,12 @@ np-time-picker .time-picker-field {
   @media (min-width: 600px) {
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
+}
+
+// "Clear filters" under a filtered list's empty state.
+.bb-list-clear {
+  margin: 0 0 var(--bb-space-5);
+  text-align: center;
 }
 
 // A card holding a list or table edge to edge, with a paginator at the bottom.

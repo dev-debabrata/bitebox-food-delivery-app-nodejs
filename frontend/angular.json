@@ -42,18 +42,14 @@
             "server": "src/main.server.ts",
             "outputMode": "server",
             "security": {
-              "allowedHosts": [
-                "localhost"
-              ]
+              "allowedHosts": ["localhost"]
             },
             "ssr": {
               "entry": "src/server.ts"
             },
             "inlineStyleLanguage": "scss",
             "stylePreprocessorOptions": {
-              "includePaths": [
-                "src/styles"
-              ]
+              "includePaths": ["src/styles"]
             },
             "allowedCommonJsDependencies": [
               "dijkstrajs",

@@ -1,7 +1,7 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormRoot, form, pattern } from '@angular/forms/signals';
 import { MatButtonModule } from '@angular/material/button';
-import { ButtonComponent } from 'nexprime';
+import { ButtonComponent, IconComponent } from 'nexprime';
 import { CartService } from '../../../core/services/cart.service';
 import { errorMessage } from '../../../core/services/api-error';
 import { NotificationService } from '../../../core/services/notification.service';
@@ -14,7 +14,10 @@ import {
 import { shownError } from '../../../shared/forms/form-errors';
 import { NP_FORM_FIELDS } from '../../../shared/forms/np-form-fields';
 import { CartQuote, CouponOffer } from '../../../shared/models/checkout.models';
-import { InrPipe, formatPaise } from '../../../shared/pipes/money.pipes';
+import { InrPipe } from '../../../shared/pipes/money.pipes';
+import { CouponTicket } from '../../../shared/components/coupon-ticket/coupon-ticket';
+import { appliedMessage } from '../../../shared/coupons/coupon-labels';
+import { forQuote } from '../../../shared/coupons/cart-offers';
 
 /**
  * Every coupon for this cart: a code box and the available offers. An offer below its minimum order
@@ -22,7 +25,7 @@ import { InrPipe, formatPaise } from '../../../shared/pipes/money.pipes';
  */
 @Component({
   selector: 'bb-coupon-dialog',
-  imports: [FormRoot, NP_FORM_FIELDS, MatButtonModule, ButtonComponent, InrPipe, BbDialogTitle],
+  imports: [FormRoot, NP_FORM_FIELDS, MatButtonModule, ButtonComponent, IconComponent, InrPipe, BbDialogTitle, CouponTicket],
   templateUrl: './coupon-dialog.html',
   styleUrl: './coupon-dialog.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -36,6 +39,20 @@ export class CouponDialog {
   protected readonly shownError = shownError;
   protected readonly error = signal<string | null>(null);
   protected readonly applying = signal(false);
+  /** The best coupon (the server's pick for this cart, else the first usable one), then the rest. */
+  protected readonly sections = computed(() => {
+    const quote = this.cart.quote();
+    const best =
+      this.offers.find((o) => o.code === quote?.bestCoupon?.code) ??
+      this.offers.find((o) => this.minOrderLeft(o) === 0);
+    return [
+      { title: 'Best coupon', items: best ? [best] : [] },
+      { title: best ? 'More coupons' : 'Available coupons', items: this.offers.filter((o) => o !== best) },
+    ].filter((s) => s.items.length);
+  });
+  protected readonly appliedCode = computed(() => this.cart.quote()?.coupon?.code ?? null);
+  /** The restaurant's offers for this cart: one is applied, the others can replace it. */
+  protected readonly restaurantOffers = computed(() => this.cart.quote()?.restaurantOffers ?? []);
   private readonly codeModel = signal({ code: '' });
   protected readonly codeForm = form(
     this.codeModel,
@@ -46,16 +63,8 @@ export class CouponDialog {
     { submission: { action: async () => this.apply(this.codeModel().code) } },
   );
 
-  /** How much more the cart needs before this offer applies (0: it can be used now). */
-  protected minOrderLeft(o: CouponOffer): number {
-    return Math.max(0, o.minOrderPaise - (this.cart.quote()?.pricing.subtotalPaise ?? 0));
-  }
-
-  /** The discount on the side panel: "40%", "₹50" or "Free delivery". */
-  protected amount(o: CouponOffer): string {
-    if (o.discountType === 'free_delivery') return 'Free delivery';
-    return o.discountType === 'percent' ? `${o.discountValue}%` : formatPaise(o.discountValue);
-  }
+  protected readonly minOrderLeft = forQuote(this.cart.quote).minOrderLeft;
+  protected readonly highlight = forQuote(this.cart.quote).highlight;
 
   protected apply(code: string): void {
     const value = code.trim();
@@ -64,7 +73,7 @@ export class CouponDialog {
     this.error.set(null);
     this.cart.applyCoupon(value).subscribe({
       next: (quote) => {
-        this.notify.success(`${quote.coupon?.code} applied — you save ${formatPaise(quote.pricing.discountPaise)}`);
+        this.notify.success(appliedMessage(quote, value.toUpperCase()));
         this.ref.close(quote);
       },
       error: (err: unknown) => {

@@ -26,10 +26,12 @@ import { CheckoutCoins } from './checkout-coins/checkout-coins';
 import { EmptyState } from '../../shared/components/empty-state/empty-state';
 import { QtyStepper } from '../../shared/components/qty-stepper/qty-stepper';
 import { VegBadge } from '../../shared/components/veg-badge/veg-badge';
-import { CouponOffer, DeliveryAddress } from '../../shared/models/checkout.models';
+import { CouponOffer, DeliveryAddress, PaymentChannel } from '../../shared/models/checkout.models';
 import { InrPipe, formatPaise } from '../../shared/pipes/money.pipes';
 import { BbDialog } from '../../shared/dialog/bb-dialog';
 import { openCoupons } from './coupon-dialog/coupon-dialog';
+import { codeApplier } from '../../shared/coupons/cart-offers';
+import { CouponTicket } from '../../shared/components/coupon-ticket/coupon-ticket';
 
 
 import { NP_FORM_FIELDS } from '../../shared/forms/np-form-fields';
@@ -46,6 +48,7 @@ import { NP_FORM_FIELDS } from '../../shared/forms/np-form-fields';
     MatRadioModule,
     BillSummary,
     CheckoutCoins,
+    CouponTicket,
     EmptyState,
     QtyStepper,
     VegBadge,
@@ -83,7 +86,26 @@ export class Checkout {
   protected readonly onlineAvailable = computed(() =>
     this.methods().some((m) => m.method === 'online'),
   );
-  protected readonly paymentMethod = signal<PaymentMethod>('cod');
+  /** Cash, or the online channel (UPI, card, ...): the bill is priced with its payment offer. */
+  protected readonly payWith = computed(() => this.cart.paymentChannel() ?? 'cod');
+  protected readonly paymentMethod = computed<PaymentMethod>(() => (this.payWith() === 'cod' ? 'cod' : 'online'));
+  protected readonly channels: { value: PaymentChannel; label: string; icon: string }[] = [
+    { value: 'upi', label: 'UPI', icon: 'smartphone' },
+    { value: 'card', label: 'Credit or debit card', icon: 'credit-card' },
+    { value: 'netbanking', label: 'Net banking', icon: 'landmark' },
+    { value: 'wallet', label: 'Wallet', icon: 'wallet' },
+  ];
+
+  /** The best payment offer for each channel on this cart (the server's figures). */
+  protected readonly paymentOffers = computed(
+    () => new Map((this.cart.quote()?.paymentOffers ?? []).map((o) => [o.channel, o])),
+  );
+
+  /** Re-prices the cart for the chosen way to pay (a channel's payment offer joins the bill). */
+  protected choosePay(value: 'cod' | PaymentChannel): void {
+    this.cart.paymentChannel.set(value === 'cod' ? null : value);
+    this.cart.refresh().subscribe({ error: (err: unknown) => this.notify.error(errorMessage(err)) });
+  }
   protected readonly placing = signal(false);
   protected readonly placeError = signal<string | null>(null);
 
@@ -99,6 +121,7 @@ export class Checkout {
     if (location?.source === 'address' && location.addressId && !this.cart.selectedAddressId()) {
       this.cart.selectedAddressId.set(location.addressId);
     }
+    this.cart.paymentChannel.set(null); // priced for cash until the customer picks a channel
     this.cart.refresh().subscribe({
       next: (quote) => {
         this.loading.set(false);
@@ -117,6 +140,27 @@ export class Checkout {
       .availableCoupons(restaurantId)
       .subscribe({ next: (list) => this.offers.set(list), error: () => this.offers.set([]) });
   }
+
+  /** The one restaurant offer on this cart (the best, or the one the customer picked). */
+  protected readonly restaurantOffer = computed(
+    () => this.cart.quote()?.restaurantOffers?.find((o) => o.applied) ?? null,
+  );
+
+  /** The server's best coupon for this cart, when it saves more than the applied one. */
+  protected readonly suggestion = computed(() => {
+    const q = this.cart.quote();
+    const best = q?.bestCoupon;
+    const extra = (best?.savingPaise ?? 0) - (q?.coupon?.discountPaise ?? 0);
+    if (!best || best.code === q?.coupon?.code || extra <= 0) return null;
+    const switching = !!q?.coupon;
+    const offer: CouponOffer = { kind: 'coupon', minOrderPaise: 0, validUntil: '', ...best };
+    return { offer, switching, line: `Save ${formatPaise(extra)}${switching ? ' more' : ''} on this order!` };
+  });
+
+  /** One tap on the suggested coupon (the server's pick for this cart). */
+  private readonly applier = codeApplier();
+  protected readonly applyBest = this.applier.apply;
+  protected readonly applying = this.applier.busy;
 
   /** "Apply coupon": every coupon for this cart; the quote refreshes once one is applied. */
   protected showCoupons(): void {
@@ -185,6 +229,7 @@ export class Checkout {
         {
           addressId,
           paymentMethod: this.paymentMethod(),
+          paymentChannel: this.cart.paymentChannel() ?? undefined,
           note: this.noteForm.note().value().trim() || undefined,
           expectedTotalPaise: quote.pricing.totalPaise,
         },

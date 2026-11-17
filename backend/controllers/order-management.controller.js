@@ -1,4 +1,6 @@
+import { statusAudit, statusMessage as accountStatusMessage } from "../services/admin-staff.service.js";
 import * as riders from "../services/delivery-partner.service.js";
+import * as riderManagement from "../services/admin-delivery-partners.service.js";
 import * as dispatch from "../services/dispatch.service.js";
 import * as orders from "../services/order-management.service.js";
 import { respond } from "../utils/api-response.js";
@@ -117,7 +119,7 @@ export const customerTimeline = respond((req) =>
 export const adminTimeline = respond((req) => orders.adminTimeline(req.params.id));
 export const restaurantStats = respond((req) => orders.restaurantStats(req.user._id));
 export const adminRiderList = respond((req) =>
-  riders.adminList(req.validatedQuery, page(req)),
+  riderManagement.listRiderManagement(req.validatedQuery, page(req)),
 );
 export const adminRiderGet = respond((req) => riders.adminGet(req.params.id));
 export const adminRiderSetVerification = respond(
@@ -134,9 +136,10 @@ export const riderResubmit = respond(
 );
 
 export const adminRiderSetStatus = respond(
-  async (req) => ({
-    user: await riders.adminSetStatus(req.params.id, req.body.status),
-  }),
-  (_req, data) =>
-    data.user.status === "active" ? "Rider reactivated" : "Rider suspended",
+  async (req) => {
+    const result = await riders.adminSetStatus(req.params.id, req.body.status, req.body.reason);
+    req.audit = statusAudit(result, req.body.reason);
+    return { user: result.user };
+  },
+  (_req, data) => accountStatusMessage("Rider", data.user.status),
 );

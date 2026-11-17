@@ -107,6 +107,9 @@ function checkoutInfo(order, payment) {
     amountPaise: payment.amountPaise,
     currency: payment.currency,
     orderNumber: order.orderNumber,
+    // The channel the customer chose (its payment offer is priced in): checkout opens with only
+    // that method. Null when any method will do.
+    channel: order.paymentChannel ?? null,
   };
 }
 
@@ -684,10 +687,11 @@ const ORDER_STATES = Object.freeze({
 });
 
 export async function adminList(
-  { status, method, provider, orderState, search, from, to },
+  { status, method, provider, orderState, search, from, to, customer },
   pagination,
 ) {
   const filter = {};
+  if (customer) filter.user = customer; // the payer is always the order's customer
   if (status) filter.status = status;
   if (method) filter.method = method;
   if (provider) filter.provider = provider;

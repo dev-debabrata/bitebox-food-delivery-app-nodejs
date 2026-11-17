@@ -1,15 +1,19 @@
 import { body, query } from "express-validator";
 import { VEHICLE_TYPES, VERIFICATION_STATUS } from "../models/delivery-partner.model.js";
-import { ORDER_STATUS } from "../models/order.model.js";
-import { USER_STATUS } from "../models/user.model.js";
+import { ORDER_STATUS, PAYMENT_METHODS, PAYMENT_STATUS } from "../models/order.model.js";
 import {
   booleanQuery,
+  dayRangeRules,
+  facetsQuery,
+  multiId,
+  multiValue,
   latitudeRule,
   longitudeRule,
   mongoIdParam,
   paginationRules,
   searchQuery,
 } from "./common.validators.js";
+import { RIDER_AVAILABILITY, RIDER_VERIFICATION_FILTERS } from "../services/admin-delivery-partners.service.js";
 
 const S = ORDER_STATUS;
 const reason = (required = false) => {
@@ -53,17 +57,19 @@ export const restaurantStatusRules = [
 ];
 
 // Rider
-export const vehicleRules = [
+// The rider's vehicle (PUT /delivery/me/vehicle; the admin rider edit makes the type optional).
+export const vehicleTypeRule = () =>
   body("vehicleType")
     .isIn(VEHICLE_TYPES)
-    .withMessage(`Vehicle must be one of: ${VEHICLE_TYPES.join(", ")}`),
+    .withMessage(`Vehicle must be one of: ${VEHICLE_TYPES.join(", ")}`);
+export const vehicleNumberRule = () =>
   body("vehicleNumber")
     .optional({ values: "falsy" })
     .isString()
     .trim()
     .matches(/^[A-Za-z0-9 -]{4,20}$/)
-    .withMessage("Enter a valid vehicle number"),
-];
+    .withMessage("Enter a valid vehicle number");
+export const vehicleRules = [vehicleTypeRule(), vehicleNumberRule()];
 export const availabilityRules = [
   body("isOnline")
     .isBoolean()
@@ -92,10 +98,19 @@ export const riderHistoryRules = paginationRules;
 
 // Admin
 export const adminOrderListRules = [
-  query("status")
-    .optional()
-    .isIn([...Object.values(S), "active"]),
+  // Several values allowed (OR); `active` = every in-progress status.
+  multiValue("status", [...Object.values(S), "active"]),
+  multiValue("paymentMethod", Object.values(PAYMENT_METHODS)),
+  multiValue("paymentStatus", Object.values(PAYMENT_STATUS)),
+  ...dayRangeRules("placedFrom", "placedTo"),
   searchQuery(),
+  // Orders placed by one customer (the admin user view).
+  query("customer").optional().isMongoId().withMessage("Invalid id"),
+  // Orders placed with one or several restaurants (also the admin restaurant account view).
+  multiId("restaurant"),
+  // Orders assigned to one rider (the admin delivery partner account view).
+  query("rider").optional().isMongoId().withMessage("Invalid id"),
+  facetsQuery(),
   ...paginationRules,
 ];
 export const adminCancelRules = [mongoIdParam(), reason(true)];
@@ -112,7 +127,12 @@ export const adminAssignRules = [
 export const adminRiderListRules = [
   searchQuery(),
   booleanQuery("online"),
-  query("verification").optional().isIn([...Object.values(VERIFICATION_STATUS), "not_submitted"]),
+  // One value or several, comma-separated (OR).
+  multiValue("verification", RIDER_VERIFICATION_FILTERS),
+  multiValue("availability", RIDER_AVAILABILITY),
+  multiValue("vehicleType", VEHICLE_TYPES),
+  multiValue("zone", null),
+  facetsQuery(),
   ...paginationRules,
 ];
 export const adminRiderVerificationRules = [
@@ -122,18 +142,19 @@ export const adminRiderVerificationRules = [
     .withMessage("Choose approved, rejected or resubmission_requested"),
   body("reason").optional().isString().trim().isLength({ max: 500 }),
 ];
-const text = (name, min, max, message) => body(name).isString().trim().isLength({ min, max }).withMessage(message);
-export const riderDetailsRules = [
-  text("address.line1", 3, 120, "Street address is required"),
-  body("address.line2").optional().isString().trim().isLength({ max: 120 }),
-  body("address.area").optional().isString().trim().isLength({ max: 80 }),
-  text("address.city", 2, 60, "City is required"),
-  text("address.state", 2, 60, "State is required"),
-  body("address.postalCode").isString().trim().matches(/^[A-Za-z0-9 -]{3,10}$/).withMessage("Enter a valid postal code"),
-];
-export const adminRiderStatusRules = [
-  mongoIdParam(),
-  body("status")
-    .isIn(Object.values(USER_STATUS))
-    .withMessage("Status must be active or suspended"),
-];
+/** The rider's home address (the whole address each time). `when` (a condition) makes it conditional. */
+export const riderAddressRules = (when) => {
+  const field = (name) => (when ? body(name).if(when) : body(name));
+  const text = (name, min, max, message) => field(name).isString().trim().isLength({ min, max }).withMessage(message);
+  return [
+    text("address.line1", 3, 120, "Street address is required"),
+    field("address.line2").optional().isString().trim().isLength({ max: 120 }),
+    field("address.area").optional().isString().trim().isLength({ max: 80 }),
+    text("address.city", 2, 60, "City is required"),
+    text("address.state", 2, 60, "State is required"),
+    field("address.postalCode").isString().trim().matches(/^[A-Za-z0-9 -]{3,10}$/).withMessage("Enter a valid postal code"),
+  ];
+};
+export const riderDetailsRules = riderAddressRules();
+// Same rules as every account status change (reason needed unless reactivating).
+export { accountStatusRules as adminRiderStatusRules } from "./admin-staff.validators.js";
