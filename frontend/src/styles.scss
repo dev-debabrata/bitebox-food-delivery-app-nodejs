@@ -1013,6 +1013,10 @@ np-toggle.bb-toggle-stable:has(input:checked) .toggle-label {
 np-toggle.bb-label-hidden .toggle-label {
   @include visually-hidden;
 }
+// np-progress-bar's `label` is also a visible caption; keep it as the accessible name only.
+np-progress-bar.bb-label-hidden .caption {
+  @include visually-hidden;
+}
 np-toggle.bb-label-hidden-phone .toggle-label {
   @include bp.phone-only {
     @include visually-hidden;
@@ -1060,6 +1064,29 @@ np-time-picker .time-picker-field {
   );
   background-size: 400% 100%;
   animation: bb-shimmer 1.4s ease infinite;
+}
+
+// A small green dot that pulses: "live" / "online" (rider dashboard, location popup).
+.bb-live-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bb-success);
+  animation: bb-live-dot 2s infinite;
+}
+
+@keyframes bb-live-dot {
+  0%,
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--bb-success) 60%, transparent);
+  }
+  50% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 6px transparent;
+  }
 }
 
 @keyframes bb-shimmer {
@@ -1751,4 +1778,21 @@ $text-button: '.mat-mdc-button-base:not(.mat-mdc-icon-button)';
       }
     }
   }
+}
+
+// A map is full screen (shared/components/map-frame): the page behind it stays put.
+body.bb-map-full-open {
+  overflow: hidden;
+}
+
+// Panel icon rail: a group's flyout menu. The pane and panel are Material's (outside the
+// component), so they are styled here; the menu's contents are in panel-shell.scss. The menu
+// starts over its icon (overlapTrigger) and the whole pane moves right, beside the 72px rail and
+// level with the icon, so nothing invisible covers the other rail icons.
+.cdk-overlay-pane:has(> .bb-rail-menu) {
+  margin-left: 62px;
+}
+
+.bb-rail-menu {
+  min-width: 220px;
 }

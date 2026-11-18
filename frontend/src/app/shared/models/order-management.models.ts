@@ -1,4 +1,5 @@
 import { RatingSummary } from './review.models';
+import { FilterPreview } from '../components/filter-panel/filter-panel.models';
 import { Pagination } from './api.models';
 import { Order, OrderStatus, RiderCard, VehicleType } from './checkout.models';
 
@@ -40,6 +41,8 @@ export interface RestaurantActiveOrders {
 export interface RestaurantOrderHistory {
   items: RestaurantOrder[];
   pagination: Pagination;
+  /** With `facets: 1`: the Filters panel's counts. */
+  facets?: FilterPreview['facets'];
 }
 
 export type RestaurantAction = 'confirmed' | 'rejected' | 'preparing' | 'ready_for_pickup';
@@ -123,6 +126,10 @@ export interface RiderOrder extends Omit<Order, 'deliveryAddress' | 'rider' | 'c
   /** "Delivered" needs the customer's 4-digit code. */
   deliveryOtpRequired?: boolean;
 }
+
+/** True when the rider must collect the total in cash at the door (cash on delivery, not yet paid). */
+export const collectsCash = (o: Pick<Order, 'paymentMethod' | 'paymentStatus'>): boolean =>
+  o.paymentMethod === 'cod' && o.paymentStatus !== 'paid';
 
 /** GET /delivery/stats. Money in paise. */
 export interface RiderStats {
